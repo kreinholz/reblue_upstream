@@ -102,11 +102,13 @@ void InputActions::Resolve() {
     held_[i] = held;
   }
 
+  anyForced_ = false;
   for (int i = 0; i < kActionCount; ++i) {
     if (!forced_[i])
       continue;
     held_[i] = true;
     forced_[i] = false;
+    anyForced_ = true;
   }
 
   bool anyHeld = false;

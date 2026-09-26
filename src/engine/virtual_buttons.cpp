@@ -11,6 +11,7 @@
 
 #include "engine/d2anime/anime_input.h"
 #include "engine/d2anime/anime_mouse.h"
+#include "engine/input/action_state.h"
 #include "engine/settings.h"
 #include "platform/platform.h"
 #include "reblue_init.h"
@@ -74,6 +75,6 @@ REX_HOOK_RAW(bdInputCheckButton) {
     ctx.r3.u32 = 0;
     return;
   }
-  if (ctx.r3.u32 != 0)
+  if (ctx.r3.u32 != 0 && !bd::engine::InputActions::Get().Forced())
     bd::engine::PadInputSeen();
 }

@@ -27,6 +27,7 @@ includes = [
   "config/hooks/render_tweaks.toml",
   "config/hooks/save.toml",
   "config/hooks/script_man_task.toml",
+  "config/hooks/shop_mouse.toml",
   "config/hooks/sofdec_player.toml",
   "config/hooks/title_menu.toml",
   "config/hooks/tutorials.toml",
