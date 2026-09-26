@@ -65,12 +65,9 @@ REXCVAR_DEFINE_STRING(bd_update_channel, REBLUE_UPDATE_CHANNEL, kCvarGroup,
                       "Which builds the check offers: stable or nightly. "
                       "Names the manifest read under bd_update_base.");
 
-// Saves live beside the game, NOT under user_data_root: that root is handed to
-// the XAM content manager, so nesting saves inside it makes the two contend
-// over the same host subtree and breaks overwrites.
 REXCVAR_DEFINE_STRING(
     bd_saves_path, "", "reblue",
-    "Save-game directory. Empty = <install_root>/saves (beside the game).");
+    "Save-game directory. Empty = the active profile's saves folder.");
 REXCVAR_DEFINE_STRING(
     bd_cache_path, "", "reblue",
     "Transient cache directory (PSO capture). Empty = <exe_dir>/cache.");
