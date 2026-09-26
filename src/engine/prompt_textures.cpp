@@ -12,6 +12,7 @@
 #include <mutex>
 #include <vector>
 
+#include <rex/ppc.h>
 #include <stb_image.h>
 
 #include "core/logging.h"
@@ -31,26 +32,36 @@ namespace {
 
 // The cap library beside the footer sheet: one 128px cell per bindable key in
 // kBindableKeys order, then the arrow cluster, then four face buttons per pad
-// in PadSet order for the pad side of these prompts.
+// in PadSet order, then LB and RB per pad in the same order.
 constexpr u32 kLibCell = 128;
 constexpr u32 kLibCols = 8;
 constexpr u32 kPadCellBase = u32(bd::platform::kBindableKeyCount) + 1;
 constexpr u32 kPadFaceButtons = 4;
+constexpr u32 kPadShoulderBase =
+    kPadCellBase + u32(kPadSetLast + 1) * kPadFaceButtons;
+constexpr u32 kPadShoulderButtons = 2;
+constexpr u32 kLibPadCellEnd =
+    kPadShoulderBase + u32(kPadSetLast + 1) * kPadShoulderButtons;
 
-// A prompt texture's cell always stands for a face button.
-int PadOrdinal(Action action) {
+// The library cell of the pad button an action is bound to, in one pad's art.
+// Only the face and shoulder buttons have a cell, since those are all a prompt
+// texture draws.
+int PadCell(Action action, u32 set) {
   for (const Source &s : Bindings::Get().Sources(action)) {
     if (s.kind != SourceKind::PadButton)
       continue;
-    switch (static_cast<Button>(s.code)) {
+    const auto button = static_cast<Button>(s.code);
+    switch (button) {
     case Button::A:
-      return 0;
     case Button::B:
-      return 1;
     case Button::X:
-      return 2;
     case Button::Y:
-      return 3;
+      return int(kPadCellBase + set * kPadFaceButtons +
+                 u32(button) - u32(Button::A));
+    case Button::LB:
+    case Button::RB:
+      return int(kPadShoulderBase + set * kPadShoulderButtons +
+                 u32(button) - u32(Button::LB));
     default:
       return -1;
     }
@@ -80,6 +91,7 @@ struct InkBox {
 
 constexpr InkBox kInk64 = {13, 15, 38, 40};
 constexpr InkBox kInkActEv = {42, 14, 172, 92};
+constexpr InkBox kInkShoulder = {1, 1, 36, 43};
 
 // One served texture: the file the engine opens, its shipped dimensions, its cell
 // grid and the cells in row-major order.
@@ -100,6 +112,11 @@ constexpr PromptCell kCellX[] = {{Action::Attack, false}};
 constexpr PromptCell kCellXPsh[] = {{Action::Attack, true}};
 constexpr PromptCell kCellY[] = {{Action::MainMenu, false}};
 constexpr PromptCell kCellYPsh[] = {{Action::MainMenu, true}};
+
+// The menu pager pair, LB then RB, which the menus page on through the field
+// skill binds.
+constexpr PromptCell kCellsPager[] = {{Action::FieldSkill2, false},
+                                      {Action::FieldSkill1, false}};
 
 // ic_btn's own pos rows: posAnr, posApsh, posBnr, posBpsh and so on down the
 // four rows, normal in the left column and pressed in the right.
@@ -136,6 +153,11 @@ constexpr PromptTex kTextures[] = {
                   kCellAPsh),
     BD_PROMPT_TEX("sca\\common\\res\\ic_btn.dds", 128, 256, 2, 4, kInk64,
                   kCellsIcBtn),
+
+    // The character pager on the shop's equipment screens and every camp
+    // screen that reuses L_shp_lbrb.csv.
+    BD_PROMPT_TEX("d2anime\\shp\\res\\ic_shp_lbrb.dds", 128, 64, 2, 1,
+                  kInkShoulder, kCellsPager),
 
     // The action event QTEs, one texture per button per state.
     BD_PROMPT_TEX("minigame\\actev\\d2anim\\res\\acv_btn_a_nrm.dds", 256, 128, 1,
@@ -294,11 +316,7 @@ std::vector<u8> Compose(const PromptTex &tex) {
     if (keyboard) {
       cell = BoundKeyIndex(tex.cells[i].action);
     } else {
-      const int ord = PadOrdinal(tex.cells[i].action);
-      const int set = static_cast<int>(Glyphs::Get().Pad());
-      cell = ord < 0 ? -1
-                     : int(kPadCellBase) +
-                           set * int(kPadFaceButtons) + ord;
+      cell = PadCell(tex.cells[i].action, u32(Glyphs::Get().Pad()));
     }
     if (cell < 0 || size_t(cell) >= lib->ink.size())
       continue;
@@ -316,12 +334,24 @@ LiveTextureStamp s_stamps[std::size(kTextures)];
 bool PadArtPresent(const CapLibrary &lib) {
   // Every set's block, since the player can pick any of them and a half-built
   // library should fall back rather than serve one pad an empty prompt.
-  for (u32 i = 0; i <= u32(kPadSetLast) * kPadFaceButtons + 3; ++i) {
-    const size_t cell = kPadCellBase + i;
+  for (u32 cell = kPadCellBase; cell < kLibPadCellEnd; ++cell) {
     if (cell >= lib.ink.size() || !lib.ink[cell].w)
       return false;
   }
   return true;
+}
+
+u32 PromptIconButton(u32 id) {
+  const auto isFace = [](u32 v) {
+    return v >= u32(Button::A) && v <= u32(Button::Y);
+  };
+  if (isFace(id))
+    return id;
+  for (const Source &s : Bindings::Get().Sources(Action::Interact)) {
+    if (s.kind == SourceKind::PadButton && isFace(s.code))
+      return s.code;
+  }
+  return u32(Button::A);
 }
 
 } // namespace
@@ -391,3 +421,11 @@ void PromptTextures::SetEnabled(bool on) {
 }
 
 } // namespace bd::engine
+
+// ScriptMan's action icon and the carriage prompt switch on Interact's engine id
+// for their ic_btn row and know only the four face ids. A rebind that parts
+// Interact from Confirm leaves it on a spare id, and the switch's fall-through
+// leaves the row rect zeroed, which draws the whole sheet.
+void bdPromptIconButtonHook(PPCRegister &r11) {
+  r11.u64 = bd::engine::PromptIconButton(r11.u32);
+}

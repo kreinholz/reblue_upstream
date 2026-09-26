@@ -213,7 +213,14 @@ void ApplyList(std::vector<Source> &out, std::vector<std::string> &errors,
       }
       source.axisSlot = ++buttonSlot;
     }
-    out.push_back(source);
+    // An axis row is positional, so only a plain list folds a repeat.
+    const bool repeat =
+        desc.axis == AxisPair::None &&
+        std::any_of(out.begin(), out.end(), [&](const Source &have) {
+          return SameSource(have, source);
+        });
+    if (!repeat)
+      out.push_back(source);
 
     if (comma == std::string_view::npos)
       break;
