@@ -12,6 +12,7 @@
 
 #include "core/memory_helpers.h"
 #include "engine/game.h"
+#include "gpu/gpu.h"
 
 namespace bd::engine {
 
@@ -134,6 +135,7 @@ int FieldEncounterMenu::CursorAt(f32 x, f32 y) const {
 
   const u32 state = self->state;
   const f32 barW = state == 2 ? kItemBarW : kBarW;
+  x -= bd::gpu::Output::DesignOverscanX();
   if (x < kBarX || x > kBarX + barW)
     return -1;
   y += f32(self->slide) * kSlideRange;
