@@ -27,6 +27,10 @@
 #include "gpu/settings.h"
 #include "gpu/shaders/shader_cache.h"
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 namespace bd::gpu {
 
 namespace {
@@ -61,7 +65,7 @@ struct FrameUpload {
 // a 24-byte compare replaces them on the hot path. Sampler heap slots are never
 // reclaimed, so a cached index stays valid until device teardown.
 struct SamplerSlotCache {
-  u32 fc[6]{};
+  u8 fc[sizeof(DeviceFetchConstant)]{};
   u32 sampler = 0;
   i32 aniso = -1;
   bool clamp3d = false;
@@ -171,7 +175,24 @@ void CopyByteSwap32Impl(u8 *dst, u32 guest_va, u32 size) {
   }
   const u32 count = size / sizeof(u32);
   auto *out = reinterpret_cast<u32 *>(dst);
-  for (u32 i = 0; i < count; ++i) {
+  u32 i = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+  const __m128i abs_mask = _mm_set1_epi32(0x7FFFFFFF);
+  const __m128i inf_bits = _mm_set1_epi32(0x7F800000);
+  for (; i + 4 <= count; i += 4) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i));
+    v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
+    v = _mm_shufflelo_epi16(v, _MM_SHUFFLE(2, 3, 0, 1));
+    v = _mm_shufflehi_epi16(v, _MM_SHUFFLE(2, 3, 0, 1));
+    if constexpr (kFlushNaN) {
+      const __m128i is_nan =
+          _mm_cmpgt_epi32(_mm_and_si128(v, abs_mask), inf_bits);
+      v = _mm_andnot_si128(is_nan, v);
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(out + i), v);
+  }
+#endif
+  for (; i < count; ++i) {
 #if defined(_MSC_VER)
     const u32 v = _byteswap_ulong(src[i]);
 #else
@@ -342,17 +363,17 @@ ConstantAllocation UploadSharedConstants(u32 device_guest) {
       // so the address mode bits there are valid.
       if (device_p) {
         const auto &fc_be = device_p->fetchConstants[i];
-        const u32 fc[6] = {
-            u32(fc_be.dword[0]), u32(fc_be.dword[1]), u32(fc_be.dword[2]),
-            u32(fc_be.dword[3]), u32(fc_be.dword[4]), u32(fc_be.dword[5]),
-        };
         const bool clamp3d =
             tex->viewDimension == plume::RenderTextureViewDimension::TEXTURE_3D;
         auto &sc = s.samplerSlots[i];
         if (sc.valid && sc.clamp3d == clamp3d && sc.aniso == aniso_now &&
-            std::memcmp(sc.fc, fc, sizeof(fc)) == 0) {
+            std::memcmp(sc.fc, &fc_be, sizeof(sc.fc)) == 0) {
           s.shared.samplerIndices[i] = sc.sampler;
         } else {
+          const u32 fc[6] = {
+              u32(fc_be.dword[0]), u32(fc_be.dword[1]), u32(fc_be.dword[2]),
+              u32(fc_be.dword[3]), u32(fc_be.dword[4]), u32(fc_be.dword[5]),
+          };
           auto desc = DecodeFromFetch(fc);
 
           // Shell fur volumes encode shell depth in W, and X360-default WRAP
@@ -362,7 +383,7 @@ ConstantAllocation UploadSharedConstants(u32 device_guest) {
             desc.addressW = plume::RenderTextureAddressMode::CLAMP;
           }
           const u32 resolved = ResolveSlotLocked(desc);
-          std::memcpy(sc.fc, fc, sizeof(fc));
+          std::memcpy(sc.fc, &fc_be, sizeof(sc.fc));
           sc.sampler = resolved;
           sc.aniso = aniso_now;
           sc.clamp3d = clamp3d;
