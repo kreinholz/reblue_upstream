@@ -111,6 +111,8 @@ ResolveSavesRoot(const std::filesystem::path &profile_root) {
 
 constexpr u64 kLogDirBudget = u64(50) << 20;
 
+constexpr bool kOfficialBuild = REBLUE_OFFICIAL_BUILD != 0;
+
 // Created if absent so PSO capture can write into it.
 std::filesystem::path ResolveCacheRoot() {
   std::filesystem::path root = bd::CacheRootFor(bd::AppRootFolder());
@@ -142,13 +144,13 @@ std::string SanitizeProfileName(const std::string &raw) {
 }
 
 // Resolve install_root without the wizard: --game_data_root's parent if set,
-// else a schema-matched registry entry. nullopt on a fresh, unregistered
+// else a schema-matched install record. nullopt on a fresh, unregistered
 // install (the installer wires the profile later, in FinishInstaller).
 std::optional<std::filesystem::path> EarlyInstallRoot() {
   std::string gdr(REXCVAR_GET(game_data_root));
   if (!gdr.empty())
     return std::filesystem::absolute(std::filesystem::path(gdr)).parent_path();
-  if (auto cfg = bd::installer::ReadInstallRegistry())
+  if (auto cfg = bd::installer::InstallConfig::Read())
     if (cfg->schema_version == bd::installer::kInstallSchemaVersion)
       return cfg->install_root;
   return std::nullopt;
@@ -268,8 +270,9 @@ void ReblueApp::OnPostInitLogging() {
 
   BD_INFO("re:Blue v" REBLUE_VERSION_STRING " [" REXGLUE_BUILD_CONFIG
           "] " REBLUE_BUILD_PLATFORM);
-  BD_INFO("  commit:  " REBLUE_GIT_COMMIT " on " REBLUE_GIT_BRANCH "{}",
-          REBLUE_GIT_DIRTY ? " (local modifications)" : "");
+  BD_INFO("  commit:  " REBLUE_GIT_COMMIT " on " REBLUE_GIT_BRANCH "{}{}",
+          REBLUE_GIT_DIRTY ? " (local modifications)" : "",
+          kOfficialBuild ? "" : " (development build)");
   BD_INFO("  built:   " REBLUE_BUILD_TIMESTAMP " with " REBLUE_BUILD_COMPILER);
   BD_INFO("  sdk:     rexglue-v" REXGLUE_VERSION_STRING
           " " REXGLUE_BUILD_PLATFORM " @" REXGLUE_BUILD_TIMESTAMP);
@@ -486,10 +489,7 @@ ReblueApp::PathsForInstall(const rex::PathConfig &defaults,
 bool ReblueApp::NeedsUpgradePrompt(
     const bd::installer::InstallConfig &cfg) const {
 #if defined(_WIN32) && defined(REBLUE_BUILD_INSTALLER)
-  // From outside the install this is a downloaded build run over an older one,
-  // not a swap the updater already made. Asking also keeps a build-dir exe off
-  // the install a developer is testing against.
-  return ProgramDir() != cfg.install_root;
+  return !cfg.Portable() && ProgramDir() != cfg.install_root;
 #else
   (void)cfg;
   return false;
@@ -497,8 +497,9 @@ bool ReblueApp::NeedsUpgradePrompt(
 }
 
 void ReblueApp::RestampInstall(const bd::installer::InstallConfig &cfg) {
-  if (!bd::installer::WriteInstallRegistry(cfg))
-    BD_WARN("Registry restamp failed, this upgrade will be offered again");
+  if (!cfg.Write())
+    BD_WARN(
+        "Install record restamp failed, this upgrade will be offered again");
 }
 
 #if defined(_WIN32) && defined(REBLUE_BUILD_INSTALLER)
@@ -576,27 +577,32 @@ ReblueApp::OnFinalizePaths(const rex::PathConfig &defaults,
 #endif
 
   std::optional<bd::installer::InstallConfig> existing_install;
-  if (auto cfg = bd::installer::ReadInstallRegistry()) {
+  if (auto cfg = bd::installer::InstallConfig::Read()) {
     if (cfg->schema_version == bd::installer::kInstallSchemaVersion &&
         !repair_requested) {
       if (cfg->app_version != REBLUE_VERSION_STRING) {
         BD_INFO("Install at {} records version '{}', running '{}'",
                 cfg->install_root.string(), cfg->app_version,
                 REBLUE_VERSION_STRING);
+        const bool newer = bd::platform::Version::Compare(
+                               REBLUE_VERSION_STRING, cfg->app_version) > 0;
+        if (kOfficialBuild && newer) {
 #if defined(_WIN32) && defined(REBLUE_BUILD_INSTALLER)
-        if (NeedsUpgradePrompt(*cfg)) {
-          // The prompt draws through the pre-guest pump, so the renderer has
-          // to be up before it is raised. From here BeginUpgrade owns the
-          // boot: it either resumes or quits.
-          if (!BeginPreGuestUI())
+          if (NeedsUpgradePrompt(*cfg)) {
+            // The prompt draws through the pre-guest pump, so the renderer has
+            // to be up before it is raised. From here BeginUpgrade owns the
+            // boot: it either resumes or quits.
+            if (!BeginPreGuestUI())
+              return std::nullopt;
+            BeginUpgrade(*cfg, defaults, resume);
             return std::nullopt;
-          BeginUpgrade(*cfg, defaults, resume);
-          return std::nullopt;
-        }
+          }
 #endif
-        RestampInstall(*cfg);
+          RestampInstall(*cfg);
+        }
       }
-      BD_INFO("Resolved install from registry");
+      BD_INFO("Resolved install from {}",
+              bd::installer::ToString(cfg->connector));
       BD_INFO("  install root:   {}", cfg->install_root.string());
       BD_INFO("  game data:      {}", cfg->game_data_path().string());
       BD_INFO("  user data:      {}", cfg->user_data_path().string());
@@ -644,7 +650,7 @@ ReblueApp::OnFinalizePaths(const rex::PathConfig &defaults,
   return std::nullopt;
 #else
   // No built-in installer: the external reBlue launcher performs the install,
-  // writing the registry that ReadInstallRegistry consumes above.
+  // writing the install record that InstallConfig::Read consumes above.
   (void)resume;
   bd::platform::ShowFatalError(
       "reblue - game not installed",
@@ -747,8 +753,9 @@ void ReblueApp::FinishInstaller(rex::PathConfig defaults,
   }
 #endif
 
-  if (!bd::installer::WriteInstallRegistry(cfg))
-    BD_WARN("Registry write failed, continuing into game for this session");
+  if (!cfg.Write())
+    BD_WARN(
+        "Install record write failed, continuing into game for this session");
   BD_INFO("Installed to {}", cfg.install_root.string());
   for (int i = 0; i < bd::installer::kDiscCount; ++i)
     BD_INFO("  disc{} hash:     {}", i + 1, cfg.iso_fingerprints[i]);
@@ -856,10 +863,9 @@ void ReblueApp::OnPreLaunchModule() {
   bd::vfs::VFS::Get().Init(rt->game_data_root(), rt->cache_root());
   bd::vfs::VFS::Get().SetProfile(profile_root);
 
-  // Arms the channel watch only. The check itself runs at the title, ahead of
+  // Arms the channel watch. The check itself runs at the title, ahead of
   // the guest's own downloadable-content load.
-  bd::platform::Updates::Get().Start();
-  bd::engine::UpdatePrompt::Get().Init(install_root_);
+  bd::platform::Updates::Get().Init(install_root_);
 
   bd::engine::MountSaveStore(rt->file_system(), ResolveSavesRoot(profile_root));
 
@@ -924,7 +930,7 @@ bool ReblueApp::PendingOverlayWork() const {
   auto &updates = Updates::Get();
   if (updates.State() == Updates::Stage::kChecking)
     return true;
-  if (Updates::CanApply() && updates.HasNewer() &&
+  if (updates.CanApply() && updates.HasNewer() &&
       updates.Generation() != update_prompt_generation_)
     return true;
   const auto sync = Sync::Get().State();
@@ -941,7 +947,7 @@ void ReblueApp::UpdateCheckStatus() {
 }
 
 void ReblueApp::MaybeShowUpdatePrompt() {
-  if (!bd::platform::Updates::CanApply())
+  if (!bd::platform::Updates::Get().CanApply())
     return;
   const u32 generation = bd::platform::Updates::Get().Generation();
   if (generation == update_prompt_generation_)
@@ -957,7 +963,6 @@ void ReblueApp::MaybeShowUpdatePrompt() {
   update_prompt_generation_ = generation;
 
   bd::ui::UpdatePromptContext ctx;
-  ctx.install_root = install_root_;
   ctx.version = newer->version;
   if (const auto manifest = bd::platform::Updates::Get().Current()) {
     if (const auto *artifact = manifest->ArtifactForThisPlatform())

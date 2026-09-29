@@ -1267,6 +1267,13 @@ space.es = "(~13 GB requeridos)"
 space.fr = "~(13 Go requis)"
 space.it = "(richiesti ~13 GB)"
 space.po = "(~13 GB necessários)"
+portable.us = "(beside the program, ~13 GB required)"
+portable_readonly.us = "Portable needs a writable program folder"
+portable_packaged.us = "Portable is not available from a package"
+
+[installer.mode]
+installed.us = "Installed"
+portable.us = "Portable"
 
 [installer.option]
 shortcut.us = "Create a desktop shortcut"

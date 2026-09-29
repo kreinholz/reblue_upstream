@@ -65,10 +65,6 @@ UpdatePrompt &UpdatePrompt::Get() {
   return s;
 }
 
-void UpdatePrompt::Init(std::filesystem::path install_root) {
-  install_root_ = std::move(install_root);
-}
-
 bool UpdatePrompt::Active() const {
   const Phase phase = phase_.load();
   return phase != Phase::kIdle && phase != Phase::kDone;
@@ -95,7 +91,7 @@ void UpdatePrompt::ShowCheckLine() {
 
 bool UpdatePrompt::EnterOffers() {
   auto &updates = Updates::Get();
-  if (Updates::CanApply() && updates.HasNewer()) {
+  if (updates.CanApply() && updates.HasNewer()) {
     if (const auto newer = updates.Newer()) {
       app_version_ = newer->version;
       app_bytes_ = 0;
@@ -211,7 +207,7 @@ bool UpdatePrompt::Hold(const Task &parent) {
       return EnterContentOffer();
     }
     confirm_.Kill();
-    updates.BeginApply(install_root_);
+    updates.BeginApply();
     phase_.store(Phase::kAppWorking);
     return true;
 

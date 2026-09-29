@@ -58,8 +58,8 @@ private:
   rex::PathConfig PathsForInstall(const rex::PathConfig &defaults,
                                   const bd::installer::InstallConfig &cfg);
 
-  // Whether this build reached an install it did not write from outside it,
-  // meaning the upgrade copies binaries and has to ask first.
+  // Whether this build sits outside a non-portable install, so upgrading it
+  // copies binaries and has to ask first. Callers gate on official and newer.
   bool NeedsUpgradePrompt(const bd::installer::InstallConfig &cfg) const;
 
   // Restamps the record so the upgrade is not offered again. Everything the
