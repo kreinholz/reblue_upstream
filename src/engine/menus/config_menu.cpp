@@ -803,7 +803,7 @@ void ConfigMenu::Update(PPCContext &ctx, u8 *base) {
     if (gen != glyph_gen_) {
       glyph_gen_ = gen;
       for (const PromptGlyph &g : ConfigLayout::kFooterGlyphs) {
-        const UVRect r = Glyphs::Get().PromptUV(g);
+        const UVRect r = Glyphs::Get().CellUV(g.helpName);
         task_.SetFloat(g.uv.u0, r.u0);
         task_.SetFloat(g.uv.v0, r.v0);
         task_.SetFloat(g.uv.u1, r.u1);

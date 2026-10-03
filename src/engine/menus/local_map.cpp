@@ -433,7 +433,7 @@ void AreaMap::SyncPrompts(bool available) {
     if (gen != glyphGen_) {
       glyphGen_ = gen;
       for (const PromptGlyph &g : kPromptGlyphs) {
-        const UVRect r = Glyphs::Get().PromptUV(g);
+        const UVRect r = Glyphs::Get().CellUV(g.helpName);
         prompts_.SetFloat(g.uv.u0, r.u0);
         prompts_.SetFloat(g.uv.v0, r.v0);
         prompts_.SetFloat(g.uv.u1, r.u1);

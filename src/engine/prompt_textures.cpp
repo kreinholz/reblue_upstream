@@ -43,32 +43,6 @@ constexpr u32 kPadShoulderButtons = 2;
 constexpr u32 kLibPadCellEnd =
     kPadShoulderBase + u32(kPadSetLast + 1) * kPadShoulderButtons;
 
-// The library cell of the pad button an action is bound to, in one pad's art.
-// Only the face and shoulder buttons have a cell, since those are all a prompt
-// texture draws.
-int PadCell(Action action, u32 set) {
-  for (const Source &s : Bindings::Get().Sources(action)) {
-    if (s.kind != SourceKind::PadButton)
-      continue;
-    const auto button = static_cast<Button>(s.code);
-    switch (button) {
-    case Button::A:
-    case Button::B:
-    case Button::X:
-    case Button::Y:
-      return int(kPadCellBase + set * kPadFaceButtons +
-                 u32(button) - u32(Button::A));
-    case Button::LB:
-    case Button::RB:
-      return int(kPadShoulderBase + set * kPadShoulderButtons +
-                 u32(button) - u32(Button::LB));
-    default:
-      return -1;
-    }
-  }
-  return -1;
-}
-
 constexpr const char *kMount = "ui:prompt-textures";
 
 // How far a pressed frame is dimmed. The stock art redraws the button pushed in
@@ -185,21 +159,24 @@ constexpr PromptTex kTextures[] = {
 struct CapLibrary {
   std::vector<u8> rgba;
   u32 width = 0, height = 0;
+  u32 cellPx = 0, cols = 0;
   std::vector<InkBox> ink;
 };
 
 std::mutex s_mutex;
 CapLibrary s_lib;
 bool s_libTried = false;
+CapLibrary s_sheet;
+bool s_sheetTried = false;
 
 // Alpha bounds of one library cell, in cell-local coordinates. A cell with no
 // art at all comes back zero-sized and is skipped rather than drawn as a dot.
 InkBox ScanCell(const CapLibrary &lib, u32 cell) {
-  const u32 ox = (cell % kLibCols) * kLibCell;
-  const u32 oy = (cell / kLibCols) * kLibCell;
-  u32 x0 = kLibCell, y0 = kLibCell, x1 = 0, y1 = 0;
-  for (u32 y = 0; y < kLibCell; ++y) {
-    for (u32 x = 0; x < kLibCell; ++x) {
+  const u32 ox = (cell % lib.cols) * lib.cellPx;
+  const u32 oy = (cell / lib.cols) * lib.cellPx;
+  u32 x0 = lib.cellPx, y0 = lib.cellPx, x1 = 0, y1 = 0;
+  for (u32 y = 0; y < lib.cellPx; ++y) {
+    for (u32 x = 0; x < lib.cellPx; ++x) {
       const u8 a = lib.rgba[(size_t(oy + y) * lib.width + ox + x) * 4 + 3];
       if (!a)
         continue;
@@ -212,6 +189,13 @@ InkBox ScanCell(const CapLibrary &lib, u32 cell) {
   if (x1 <= x0 || y1 <= y0)
     return {0, 0, 0, 0};
   return {x0, y0, x1 - x0, y1 - y0};
+}
+
+void ScanCells(CapLibrary &lib) {
+  const u32 cells = (lib.width / lib.cellPx) * (lib.height / lib.cellPx);
+  lib.ink.resize(cells);
+  for (u32 i = 0; i < cells; ++i)
+    lib.ink[i] = ScanCell(lib, i);
 }
 
 // Guarded because a VFS provider runs on whichever thread opened the file, and
@@ -234,19 +218,71 @@ const CapLibrary *Library() {
 
   s_lib.width = u32(w);
   s_lib.height = u32(h);
+  s_lib.cellPx = kLibCell;
+  s_lib.cols = kLibCols;
   s_lib.rgba.assign(pixels, pixels + size_t(w) * h * 4);
   stbi_image_free(pixels);
-
-  const u32 cells = (s_lib.width / kLibCell) * (s_lib.height / kLibCell);
-  s_lib.ink.resize(cells);
-  for (u32 i = 0; i < cells; ++i)
-    s_lib.ink[i] = ScanCell(s_lib, i);
+  ScanCells(s_lib);
   return &s_lib;
 }
 
-// Area-averaged sample of a library cell's ink rect. Every destination here is a
-// downscale from the 128px library, and point sampling a cap's outline at a
-// third of its size drops whole strokes out of it.
+const CapLibrary *Sheet() {
+  if (s_sheetTried)
+    return s_sheet.width ? &s_sheet : nullptr;
+  s_sheetTried = true;
+
+  s_sheet.rgba = Glyphs::SheetPixels();
+  if (s_sheet.rgba.empty()) {
+    BD_ERROR("[prompts] the glyph sheet did not decode");
+    return nullptr;
+  }
+  s_sheet.cellPx = Glyphs::kSheetCellPx;
+  s_sheet.cols = Glyphs::kSheetCols;
+  s_sheet.width = Glyphs::kSheetCols * Glyphs::kSheetCellPx;
+  s_sheet.height = Glyphs::kSheetRows * Glyphs::kSheetCellPx;
+  ScanCells(s_sheet);
+  return &s_sheet;
+}
+
+struct CapRef {
+  const CapLibrary *lib = nullptr;
+  u32 cell = 0;
+};
+
+// The cap of the pad button an action is bound to, in one pad's art. The face
+// and shoulder buttons come from the library at its larger size, everything
+// else from that pad's block on the glyph sheet.
+CapRef PadCap(Action action, u32 set) {
+  for (const Source &s : Bindings::Get().Sources(action)) {
+    if (s.kind != SourceKind::PadButton)
+      continue;
+    const auto button = static_cast<Button>(s.code);
+    switch (button) {
+    case Button::A:
+    case Button::B:
+    case Button::X:
+    case Button::Y:
+      return {Library(), kPadCellBase + set * kPadFaceButtons + u32(button) -
+                             u32(Button::A)};
+    case Button::LB:
+    case Button::RB:
+      return {Library(), kPadShoulderBase + set * kPadShoulderButtons +
+                             u32(button) - u32(Button::LB)};
+    default:
+      break;
+    }
+    const int cell = Glyphs::Get().PadSheetCell(int(s.code));
+    if (cell < 0)
+      return {};
+    return {Sheet(), u32(cell)};
+  }
+  return {};
+}
+
+// Area-averaged sample of a library cell's ink rect. Nearly every destination
+// is a downscale, and point sampling a cap's outline at a third of its size
+// drops whole strokes out of it. A sheet cap drawn into a QTE button is the one
+// upscale, and comes out nearest-sampled.
 void DrawCap(std::vector<u8> &dst, u32 dstW, const CapLibrary &lib, u32 cell,
              const InkBox &box, bool pressed) {
   const InkBox &src = lib.ink[cell];
@@ -262,8 +298,8 @@ void DrawCap(std::vector<u8> &dst, u32 dstW, const CapLibrary &lib, u32 cell,
   const u32 left = box.x + (box.w - outW) / 2;
   const u32 top = box.y + (box.h - outH) / 2;
 
-  const u32 cx = (cell % kLibCols) * kLibCell + src.x;
-  const u32 cy = (cell / kLibCols) * kLibCell + src.y;
+  const u32 cx = (cell % lib.cols) * lib.cellPx + src.x;
+  const u32 cy = (cell / lib.cols) * lib.cellPx + src.y;
 
   for (u32 y = 0; y < outH; ++y) {
     const u32 sy0 = src.h * y / outH;
@@ -312,18 +348,20 @@ std::vector<u8> Compose(const PromptTex &tex) {
   const u32 cellH = tex.height / tex.rows;
 
   for (u32 i = 0; i < tex.cellCount; ++i) {
-    int cell;
+    CapRef cap;
     if (keyboard) {
-      cell = BoundKeyIndex(tex.cells[i].action);
+      const int key = BoundKeyIndex(tex.cells[i].action);
+      if (key >= 0)
+        cap = {lib, u32(key)};
     } else {
-      cell = PadCell(tex.cells[i].action, u32(Glyphs::Get().Pad()));
+      cap = PadCap(tex.cells[i].action, u32(Glyphs::Get().Pad()));
     }
-    if (cell < 0 || size_t(cell) >= lib->ink.size())
+    if (!cap.lib || cap.cell >= cap.lib->ink.size())
       continue;
     const InkBox box = {(i % tex.cols) * cellW + tex.ink.x,
                         (i / tex.cols) * cellH + tex.ink.y, tex.ink.w,
                         tex.ink.h};
-    DrawCap(rgba, tex.width, *lib, u32(cell), box, tex.cells[i].pressed);
+    DrawCap(rgba, tex.width, *cap.lib, cap.cell, box, tex.cells[i].pressed);
   }
   return BuildGuestTexture(rgba, tex.width, tex.height);
 }

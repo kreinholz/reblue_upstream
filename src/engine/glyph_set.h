@@ -91,14 +91,22 @@ public:
   // vars in place of the snapshot the parse took.
   UVRect CellUV(const char *helpName) const;
 
-  UVRect PromptUV(const PromptGlyph &glyph) const;
-
   // The ink band of one key's cap, cut clear of the cell's transparent
   // margins, for a surface that scales the cap well below the footers' 64px.
   // Index is a kBindableKeys position, negative gets the blank cell.
   static UVRect KeyArtUV(int keyIndex);
 
   bool PadButtonUV(int padButton, UVRect &uv) const;
+
+  // Sheet cell holding a pad button's art in the current pad set, or -1 for a
+  // code the sheet has no art for.
+  int PadSheetCell(int padButton) const;
+
+  static std::vector<u8> SheetPixels();
+
+  static constexpr u32 kSheetCols = 8;
+  static constexpr u32 kSheetRows = 32;
+  static constexpr u32 kSheetCellPx = 64;
 
   // Position of a bind's modifier prefix ("Shift+", "Ctrl+", "Alt+", with or
   // without the plus) in the sheet's modifier run, or -1 for anything else.

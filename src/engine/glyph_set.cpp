@@ -12,7 +12,9 @@
 #include <string_view>
 #include <vector>
 
+#include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/util.h>
+#include <rex/graphics/xenos.h>
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/ui/keybinds.h>
@@ -61,9 +63,8 @@ constexpr u32 kVarU1 = 0x30;
 constexpr u32 kVarV1 = 0x34;
 constexpr u32 kVarTypeElement = 0;
 
-// Cell grid of the served sheet.
-constexpr int kSheetCols = 8;
-constexpr int kSheetRows = 32;
+constexpr int kSheetCols = int(Glyphs::kSheetCols);
+constexpr int kSheetRows = int(Glyphs::kSheetRows);
 
 // follows, in kBindableKeys order, then the arrow cluster and the three
 // modifier caps close the run.
@@ -150,6 +151,55 @@ void BlitSheetCell(u8 *dst, const u8 *src, size_t payloadBytes, int dstCell,
   }
 }
 
+constexpr u32 kBlockEdge = 4;
+
+u32 Expand565(u16 c, int shift, int bits) {
+  const u32 v = (c >> shift) & ((1u << bits) - 1u);
+  return v * 255u / ((1u << bits) - 1u);
+}
+
+// One DXT5 block, already in little-endian order, into a 4x4 RGBA patch.
+void DecodeBC3Block(const u8 *block, u8 *dst, u32 dstPitchPx) {
+  u8 alpha[8] = {block[0], block[1]};
+  if (alpha[0] > alpha[1]) {
+    for (int i = 0; i < 6; ++i)
+      alpha[2 + i] = u8(((6 - i) * alpha[0] + (i + 1) * alpha[1]) / 7);
+  } else {
+    for (int i = 0; i < 4; ++i)
+      alpha[2 + i] = u8(((4 - i) * alpha[0] + (i + 1) * alpha[1]) / 5);
+    alpha[6] = 0;
+    alpha[7] = 255;
+  }
+  u64 alphaBits = 0;
+  for (int i = 0; i < 6; ++i)
+    alphaBits |= u64(block[2 + i]) << (8 * i);
+
+  const u16 c0 = u16(block[8] | (block[9] << 8));
+  const u16 c1 = u16(block[10] | (block[11] << 8));
+  const u32 colorBits = u32(block[12]) | (u32(block[13]) << 8) |
+                        (u32(block[14]) << 16) | (u32(block[15]) << 24);
+  u32 color[4][3];
+  for (int ch = 0; ch < 3; ++ch) {
+    constexpr int kShift[3] = {11, 5, 0};
+    constexpr int kBits[3] = {5, 6, 5};
+    const u32 a = Expand565(c0, kShift[ch], kBits[ch]);
+    const u32 b = Expand565(c1, kShift[ch], kBits[ch]);
+    color[0][ch] = a;
+    color[1][ch] = b;
+    color[2][ch] = (2 * a + b) / 3;
+    color[3][ch] = (a + 2 * b) / 3;
+  }
+
+  for (u32 t = 0; t < kBlockEdge * kBlockEdge; ++t) {
+    u8 *px = dst + (size_t(t / kBlockEdge) * dstPitchPx + t % kBlockEdge) * 4;
+    const u32 *rgb = color[(colorBits >> (2 * t)) & 3];
+    px[0] = u8(rgb[0]);
+    px[1] = u8(rgb[1]);
+    px[2] = u8(rgb[2]);
+    px[3] = alpha[(alphaBits >> (3 * t)) & 7];
+  }
+}
+
 // The cell whose art a prompt should show on a keyboard: the cap of the bound
 // key, the arrow cluster for the D-pad, or the blank half-cell for a button
 // nobody bound.
@@ -160,15 +210,26 @@ int ArtCell(const GlyphCell &c) {
   return key < 0 ? kBlankCell : kKeyCellBase + key;
 }
 
+// Position of a pad button's art inside one pad set's block.
+int PadSetIndex(int padButton) {
+  constexpr int kPadLS = 6, kPadRS = 7, kPadLSUp = int(Button::LSUp);
+  if (padButton >= int(Button::Up) && padButton <= int(Button::Right))
+    return kPadDpadCell + padButton - int(Button::Up);
+  if (padButton == kPadLS || padButton == kPadRS)
+    return kPadStickPressCell + padButton - kPadLS;
+  if (padButton >= kPadLSUp && padButton < kPadLSUp + 8)
+    return kPadStickDirCell + padButton - kPadLSUp;
+  for (int i = 0; i < Glyphs::kHelpCells; ++i) {
+    if (kCells[i].padButton >= 0 && kCells[i].padButton == padButton)
+      return i;
+  }
+  return -1;
+}
+
 int PadGlyphIndex(Action action) {
   for (const Source &s : Bindings::Get().Sources(action)) {
-    if (s.kind != SourceKind::PadButton)
-      continue;
-    for (int i = 0; i < Glyphs::kHelpCells; ++i) {
-      if (kCells[i].padButton == int(s.code))
-        return i;
-    }
-    return -1;
+    if (s.kind == SourceKind::PadButton)
+      return PadSetIndex(int(s.code));
   }
   return -1;
 }
@@ -205,21 +266,6 @@ PadSet HostPadSet() {
     return PadSet::SteamDeck;
   default:
     return PadSet::Xbox360;
-  }
-}
-
-const char *HelpNameForAction(Action action) {
-  switch (ActionButton(action)) {
-  case Button::A:
-    return "Help_A_Uv";
-  case Button::B:
-    return "Help_B_Uv";
-  case Button::X:
-    return "Help_X_Uv";
-  case Button::Y:
-    return "Help_Y_Uv";
-  default:
-    return nullptr;
   }
 }
 
@@ -334,15 +380,6 @@ void Glyphs::WriteCell(u32 va, int cell) const {
   GlyphCommitVar(va);
 }
 
-UVRect Glyphs::PromptUV(const PromptGlyph &glyph) const {
-  const char *name = nullptr;
-  if (std::strcmp(glyph.helpName, "Help_A_Uv") == 0)
-    name = HelpNameForAction(Action::Confirm);
-  else if (std::strcmp(glyph.helpName, "Help_B_Uv") == 0)
-    name = HelpNameForAction(Action::Cancel);
-  return CellUV(name ? name : glyph.helpName);
-}
-
 UVRect Glyphs::CellUV(const char *helpName) const {
   for (const GlyphCell &c : kCells) {
     if (std::strcmp(c.name, helpName) == 0)
@@ -360,22 +397,46 @@ UVRect Glyphs::KeyArtUV(int keyIndex) {
           c.v0 + kInkY1 * h};
 }
 
-bool Glyphs::PadButtonUV(int padButton, UVRect &uv) const {
-  constexpr int kPadLS = 6, kPadRS = 7, kPadLSUp = int(Button::LSUp);
-  int idx = -1;
-  if (padButton >= int(Button::Up) && padButton <= int(Button::Right))
-    idx = kPadDpadCell + padButton;
-  else if (padButton == kPadLS || padButton == kPadRS)
-    idx = kPadStickPressCell + padButton - kPadLS;
-  else if (padButton >= kPadLSUp && padButton < kPadLSUp + 8)
-    idx = kPadStickDirCell + padButton - kPadLSUp;
-  for (int i = 0; idx < 0 && i < kHelpCells; ++i) {
-    if (kCells[i].padButton >= 0 && kCells[i].padButton == padButton)
-      idx = i;
+std::vector<u8> Glyphs::SheetPixels() {
+  namespace tc = rex::graphics::texture_conversion;
+  namespace tu = rex::graphics::texture_util;
+  constexpr auto kSheet = bd::Embedded("glyphs/cmn_help_menue.dds");
+  if (kSheet.size <= kSheetPayload)
+    return {};
+  const u8 *src = kSheet.data + kSheetPayload;
+  const size_t bytes = kSheet.size - kSheetPayload;
+
+  constexpr u32 kWidth = kSheetCols * kSheetCellPx;
+  constexpr u32 kHeight = kSheetRows * kSheetCellPx;
+  std::vector<u8> rgba(size_t(kWidth) * kHeight * 4, 0);
+  for (u32 by = 0; by < kHeight / kBlockEdge; ++by) {
+    for (u32 bx = 0; bx < kWidth / kBlockEdge; ++bx) {
+      const i32 off = tu::GetTiledOffset2D(i32(bx), i32(by), kSheetBlockPitch,
+                                           kSheetBlockLog2);
+      if (off < 0 || size_t(off) + kSheetBlockBytes > bytes)
+        continue;
+      u8 block[kSheetBlockBytes];
+      tc::CopySwapBlock(rex::graphics::xenos::Endian::k8in16, block, src + off,
+                        kSheetBlockBytes);
+      DecodeBC3Block(
+          block,
+          rgba.data() + (size_t(by) * kBlockEdge * kWidth + bx * kBlockEdge) * 4,
+          kWidth);
+    }
   }
-  if (idx < 0)
+  return rgba;
+}
+
+int Glyphs::PadSheetCell(int padButton) const {
+  const int idx = PadSetIndex(padButton);
+  return idx < 0 ? -1 : PadSetCell(pad_, idx);
+}
+
+bool Glyphs::PadButtonUV(int padButton, UVRect &uv) const {
+  const int cell = PadSheetCell(padButton);
+  if (cell < 0)
     return false;
-  const UVRect c = CellRect(PadSetCell(pad_, idx));
+  const UVRect c = CellRect(cell);
   const f32 w = c.u1 - c.u0;
   const f32 h = c.v1 - c.v0;
   uv = {c.u0 + kInkX0 * w, c.v0 + kInkY0 * h, c.u0 + kInkX1 * w,
