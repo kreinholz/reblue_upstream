@@ -31,20 +31,19 @@ void Prefetch::Init(const std::filesystem::path &game_root) {
   if (!Settings::Get().DiscPrefetch() || game_root.empty())
     return;
 
-  worker_ = std::jthread([this, game_root](std::stop_token stop) {
-    Walk(std::move(stop), game_root);
-  });
+  Shutdown();
+  stop_ = false;
+  worker_ = std::thread([this, game_root] { Walk(game_root); });
 }
 
 void Prefetch::Shutdown() {
   if (!worker_.joinable())
     return;
-  worker_.request_stop();
+  stop_ = true;
   worker_.join();
 }
 
-void Prefetch::Walk(std::stop_token stop,
-                    const std::filesystem::path &game_root) {
+void Prefetch::Walk(const std::filesystem::path &game_root) {
   bd::DemoteThreadToBackground();
 
   const auto started = std::chrono::steady_clock::now();
@@ -60,7 +59,7 @@ void Prefetch::Walk(std::stop_token stop,
 
     const std::filesystem::recursive_directory_iterator end;
     while (it != end) {
-      if (stop.stop_requested())
+      if (stop_)
         return;
 
       std::error_code stat_ec;
@@ -76,7 +75,7 @@ void Prefetch::Walk(std::stop_token stop,
     }
   }
 
-  if (stop.stop_requested())
+  if (stop_)
     return;
 
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

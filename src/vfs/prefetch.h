@@ -8,8 +8,8 @@
  */
 #pragma once
 
+#include <atomic>
 #include <filesystem>
-#include <stop_token>
 #include <thread>
 
 namespace bd::vfs {
@@ -23,9 +23,10 @@ public:
   void Shutdown();
 
 private:
-  void Walk(std::stop_token stop, const std::filesystem::path &game_root);
+  void Walk(const std::filesystem::path &game_root);
 
-  std::jthread worker_;
+  std::atomic<bool> stop_{false};
+  std::thread worker_;
 };
 
 } // namespace bd::vfs
